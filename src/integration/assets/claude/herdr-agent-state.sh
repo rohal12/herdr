@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 set -eu
 
@@ -119,10 +119,22 @@ def run():
                     pass
                 report_state("working")
         elif hook_event_name == "UserPromptSubmit":
-            # A new turn is starting (a real prompt, or a resume when a background
-            # task completed). Drop the flag; herdr's pending hint is cleared by
-            # the next Stop that finds no outstanding task.
-            bgflag_clear()
+            prompt = str(hook_input.get("prompt") or "")
+            if "<task-notification>" in prompt and "<event>" in prompt:
+                # An intermediate event from a still-running Monitor (e.g. a CI
+                # pipeline emitting progress). The task is NOT done, so keep the
+                # pane marked as waiting; a Monitor emits <event> per update and
+                # only carries <status> when the stream ends.
+                try:
+                    open(bgflag_path(), "w").close()
+                except OSError:
+                    pass
+            else:
+                # A real user prompt, a run_in_background completion, or a
+                # Monitor stream-end: the awaited task returned (or the user took
+                # over). Clear the flag; the next Stop reports idle unless another
+                # task is still armed.
+                bgflag_clear()
         elif hook_event_name == "Stop":
             if os.path.exists(bgflag_path()):
                 report_state("working")
