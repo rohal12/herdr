@@ -2,7 +2,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 param([string]$Action = "")
 
@@ -56,7 +56,15 @@ if ($Action -eq "bgtrack") {
             Report-State "working"
         }
     } elseif ($eventName -eq "UserPromptSubmit") {
-        Clear-BgFlag
+        $prompt = "$($payload.prompt)"
+        if ($prompt -like "*<task-notification>*" -and $prompt -like "*<event>*") {
+            # Intermediate event from a still-running Monitor (e.g. a CI pipeline
+            # emitting progress): the task is not done, so keep the flag set.
+            try { New-Item -ItemType File -Force -Path (Get-BgFlagPath) | Out-Null } catch {}
+        } else {
+            # Real user prompt, run_in_background completion, or Monitor stream-end.
+            Clear-BgFlag
+        }
     } elseif ($eventName -eq "Stop") {
         if (Test-Path (Get-BgFlagPath)) { Report-State "working" } else { Report-State "idle" }
     }
