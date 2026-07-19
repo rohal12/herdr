@@ -2611,11 +2611,40 @@ impl AppState {
                 session_ref,
             } => {
                 if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label) {
-                    self.update_terminal_state(pane_id, |terminal| {
+                    // Reserved agents (Claude, Codex, …) derive their live state
+                    // from native screen detection, so a reported state is never
+                    // authoritative. For agents whose hook opts in (currently only
+                    // Claude), a working/idle report is still honored as a
+                    // background-activity hint: a turn that ends while a
+                    // run_in_background/Monitor task is pending reports `working`,
+                    // keeping the pane from being shown as done while it waits; the
+                    // matching `idle` report clears the hint. Other reserved agents
+                    // keep screen detection fully authoritative.
+                    let background_pending =
+                        if crate::agent_resume::agent_reports_background_pending(
+                            &source,
+                            &agent_label,
+                        ) {
+                            match state {
+                                crate::detect::AgentState::Working => Some(true),
+                                crate::detect::AgentState::Idle => Some(false),
+                                crate::detect::AgentState::Blocked
+                                | crate::detect::AgentState::Unknown => None,
+                            }
+                        } else {
+                            None
+                        };
+                    let mut updates = Vec::new();
+                    if let Some(pending) = background_pending {
+                        let now = Instant::now();
+                        updates.extend(self.update_terminal_state(pane_id, |terminal| {
+                            terminal.set_background_pending(pending, now)
+                        }));
+                    }
+                    updates.extend(self.update_terminal_state(pane_id, |terminal| {
                         terminal.set_agent_session_ref(source, agent_label, session_ref, seq)
-                    })
-                    .into_iter()
-                    .collect()
+                    }));
+                    updates
                 } else {
                     self.update_terminal_state(pane_id, |terminal| {
                         terminal.set_hook_authority_with_session_ref(
@@ -4852,6 +4881,80 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Idle);
         assert!(terminal.hook_authority.is_none());
         assert!(terminal.persisted_agent_session.is_some());
+    }
+
+    #[test]
+    fn claude_background_pending_report_keeps_idle_pane_working() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        // Claude's turn ended: screen reads idle.
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        assert_eq!(
+            state.terminals.get(&terminal_id).unwrap().state,
+            AgentState::Idle
+        );
+
+        // Hook reports a pending background task: the pane must stay working, not
+        // flip to the "done" checkmark, and no hook authority is created.
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(1),
+            session_ref: None,
+        });
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(terminal.hook_authority.is_none());
+
+        // A subsequent idle screen read must not flip it to done while the task
+        // is still pending.
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        assert_eq!(
+            state.terminals.get(&terminal_id).unwrap().state,
+            AgentState::Working
+        );
+
+        // The task completes: the hook reports idle and the pane returns to the
+        // genuine done/idle state.
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Idle,
+            message: None,
+            seq: Some(2),
+            session_ref: None,
+        });
+        assert_eq!(
+            state.terminals.get(&terminal_id).unwrap().state,
+            AgentState::Idle
+        );
     }
 
     #[test]

@@ -91,6 +91,15 @@ pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
     )
 }
 
+/// Reserved-native-state agents whose hook additionally reports a background-task
+/// hint: `working` while a `run_in_background`/Monitor task is pending and `idle`
+/// once it clears. Only for these is a reserved-source working/idle report applied
+/// as a `background_pending` toggle (screen detection still owns the base state);
+/// every other reserved agent keeps screen detection fully authoritative.
+pub fn agent_reports_background_pending(source: &str, agent: &str) -> bool {
+    matches!((source, agent), ("herdr:claude", "claude"))
+}
+
 pub fn session_ref_from_snapshot(
     source: &str,
     agent: &str,

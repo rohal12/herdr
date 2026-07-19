@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=7
+# HERDR_INTEGRATION_VERSION=8
 
 set -eu
 
@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session) ;;
+  session|bgtrack) ;;
   *) exit 0 ;;
 esac
 
@@ -22,80 +22,160 @@ esac
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY'
+# This runs as a PreToolUse/Stop/UserPromptSubmit hook, so it must never fail the
+# tool: the python body is fully guarded and the script always exits 0.
+HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY' || true
 import json
 import os
 import random
 import socket
+import tempfile
 import time
 
-source = "herdr:claude"
-action = os.environ.get("HERDR_ACTION", "")
-pane_id = os.environ.get("HERDR_PANE_ID")
-socket_path = os.environ.get("HERDR_SOCKET_PATH")
-hook_input_file = os.environ.get("HERDR_HOOK_INPUT_FILE")
 
-if not pane_id or not socket_path:
-    raise SystemExit(0)
+def run():
+    source = "herdr:claude"
+    action = os.environ.get("HERDR_ACTION", "")
+    pane_id = os.environ.get("HERDR_PANE_ID")
+    socket_path = os.environ.get("HERDR_SOCKET_PATH")
+    hook_input_file = os.environ.get("HERDR_HOOK_INPUT_FILE")
 
-hook_input = {}
-if hook_input_file:
-    try:
-        with open(hook_input_file, encoding="utf-8") as handle:
-            content = handle.read()
-        if content.strip():
-            hook_input = json.loads(content)
-    except Exception:
-        hook_input = {}
+    if not pane_id or not socket_path:
+        return
 
-hook_event_name = str(hook_input.get("hook_event_name") or "")
-is_subagent = bool(hook_input.get("agent_id"))
-if is_subagent:
-    raise SystemExit(0)
-if hook_event_name == "SubagentStop":
-    # SubagentStop is a completion event. Older Herdr integrations mapped it
-    # to durable working, but Claude recap/away-summary can emit it after the
-    # main turn has already stopped. Never let it revive an idle pane.
-    raise SystemExit(0)
-request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
-report_seq = time.time_ns()
-session_id = hook_input.get("session_id")
-agent_session_id = session_id if isinstance(session_id, str) and session_id else None
-transcript_path = hook_input.get("transcript_path")
-agent_session_path = transcript_path if isinstance(transcript_path, str) and transcript_path else None
-session_start_source = hook_input.get("source") if hook_event_name == "SessionStart" else None
-if not isinstance(session_start_source, str) or not session_start_source:
-    session_start_source = None
-if agent_session_id:
+    hook_input = {}
+    if hook_input_file:
+        try:
+            with open(hook_input_file, encoding="utf-8") as handle:
+                content = handle.read()
+            if content.strip():
+                hook_input = json.loads(content)
+        except Exception:
+            hook_input = {}
+
+    hook_event_name = str(hook_input.get("hook_event_name") or "")
+    if hook_input.get("agent_id"):
+        # Subagent lifecycle events must never move the main pane state.
+        return
+
+    def send(request):
+        try:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(0.5)
+            client.connect(socket_path)
+            client.sendall((json.dumps(request) + "\n").encode())
+            try:
+                client.recv(4096)
+            except Exception:
+                pass
+            client.close()
+        except Exception:
+            pass
+
+    def request_id():
+        return f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
+
+    def report_state(state):
+        send({
+            "id": request_id(),
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": pane_id,
+                "source": source,
+                "agent": "claude",
+                "state": state,
+                "seq": time.time_ns(),
+            },
+        })
+
+    def bgflag_path():
+        safe = "".join(c if c.isalnum() else "_" for c in pane_id)
+        return os.path.join(tempfile.gettempdir(), "herdr-claude-bgpending-" + safe)
+
+    def bgflag_clear():
+        try:
+            os.remove(bgflag_path())
+        except OSError:
+            pass
+
+    # Background-task tracking. Claude sets an identical idle terminal title
+    # whether a turn is finished or has ended with a run_in_background/Monitor
+    # task still pending, so herdr cannot tell "done" from "waiting on a task"
+    # from the screen. We remember outstanding tasks in a per-pane flag file and
+    # report `working` at Stop while one is pending, so a waiting session is not
+    # shown as a done checkmark. herdr's reserved-source handler turns these
+    # working/idle reports into a background-pending hint (screen detection still
+    # owns the base state).
+    if action == "bgtrack":
+        if hook_event_name == "PreToolUse":
+            tool = str(hook_input.get("tool_name") or "")
+            tool_input = hook_input.get("tool_input")
+            if not isinstance(tool_input, dict):
+                tool_input = {}
+            if tool == "Monitor" or bool(tool_input.get("run_in_background")):
+                try:
+                    open(bgflag_path(), "w").close()
+                except OSError:
+                    pass
+                report_state("working")
+        elif hook_event_name == "UserPromptSubmit":
+            # A new turn is starting (a real prompt, or a resume when a background
+            # task completed). Drop the flag; herdr's pending hint is cleared by
+            # the next Stop that finds no outstanding task.
+            bgflag_clear()
+        elif hook_event_name == "Stop":
+            if os.path.exists(bgflag_path()):
+                report_state("working")
+            else:
+                report_state("idle")
+        return
+
+    # action == "session": link the pane to the Claude session for resume.
+    if hook_event_name == "SessionStart":
+        # Fresh/resumed/cleared session: start from a clean background-task slate.
+        bgflag_clear()
+    if hook_event_name == "SubagentStop":
+        # SubagentStop is a completion event. Older Herdr integrations mapped it
+        # to durable working, but Claude recap/away-summary can emit it after the
+        # main turn has already stopped. Never let it revive an idle pane.
+        return
+
+    session_id = hook_input.get("session_id")
+    agent_session_id = session_id if isinstance(session_id, str) and session_id else None
+    transcript_path = hook_input.get("transcript_path")
+    agent_session_path = (
+        transcript_path if isinstance(transcript_path, str) and transcript_path else None
+    )
+    session_start_source = (
+        hook_input.get("source") if hook_event_name == "SessionStart" else None
+    )
+    if not isinstance(session_start_source, str) or not session_start_source:
+        session_start_source = None
+    if not agent_session_id:
+        return
+
     params = {
         "pane_id": pane_id,
         "source": source,
         "agent": "claude",
-        "seq": report_seq,
+        "seq": time.time_ns(),
         "agent_session_id": agent_session_id,
     }
     if agent_session_path:
         params["agent_session_path"] = agent_session_path
     if session_start_source:
         params["session_start_source"] = session_start_source
-    request = {
-        "id": request_id,
+    send({
+        "id": request_id(),
         "method": "pane.report_agent_session",
         "params": params,
-    }
-else:
-    raise SystemExit(0)
+    })
+
 
 try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
-    client.connect(socket_path)
-    client.sendall((json.dumps(request) + "\n").encode())
-    try:
-        client.recv(4096)
-    except Exception:
-        pass
-    client.close()
+    run()
 except Exception:
     pass
 PY
+
+exit 0
