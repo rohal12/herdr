@@ -146,6 +146,35 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         10,
         Some("*"),
     )?;
+    // Background-task tracking: Claude uses the same idle terminal title whether a
+    // turn is finished or has ended with a run_in_background/Monitor task still
+    // pending. These hooks let the pane stay "working" while it waits, instead of
+    // showing a "done" checkmark. `bgtrack` dispatches on the hook event; the
+    // PreToolUse matcher limits its cost to the tools that arm background work.
+    remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("bgtrack"))?;
+    remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("bgtrack"))?;
+    remove_hook_commands(hooks, "Stop", &hook_path, Some("bgtrack"))?;
+    ensure_command_hook(
+        hooks,
+        "PreToolUse",
+        hook_command(&hook_path, Some("bgtrack")),
+        10,
+        Some("Bash|Monitor"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "UserPromptSubmit",
+        hook_command(&hook_path, Some("bgtrack")),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "Stop",
+        hook_command(&hook_path, Some("bgtrack")),
+        10,
+        Some("*"),
+    )?;
     remove_legacy_bash_hook_file(&hook_path)?;
 
     fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
@@ -585,6 +614,11 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
             updated_settings |= remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
             updated_settings |=
                 remove_hook_commands(hooks, "SessionEnd", &hook_path, Some("release"))?;
+            updated_settings |=
+                remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("bgtrack"))?;
+            updated_settings |=
+                remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("bgtrack"))?;
+            updated_settings |= remove_hook_commands(hooks, "Stop", &hook_path, Some("bgtrack"))?;
         }
 
         if updated_settings {

@@ -103,6 +103,13 @@ pub struct TerminalState {
     pub fallback_state: AgentState,
     fallback_visible_blocker: bool,
     fallback_observed_at: Option<Instant>,
+    /// Set by a reserved-native-state agent's hook (e.g. Claude) to signal that
+    /// the agent has an outstanding background task — a `run_in_background`
+    /// Bash/Monitor invocation whose completion will resume the turn on its own.
+    /// Screen detection still owns the base state; this only upgrades an
+    /// otherwise-`Idle` pane to `Working` so a session waiting on a background
+    /// task is not presented as done. See `recompute_effective_state`.
+    background_pending: bool,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
@@ -135,6 +142,7 @@ impl TerminalState {
             fallback_state: AgentState::Unknown,
             fallback_visible_blocker: false,
             fallback_observed_at: None,
+            background_pending: false,
             hook_authority: None,
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
@@ -1282,6 +1290,7 @@ impl TerminalState {
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
         self.fallback_observed_at = None;
+        self.background_pending = false;
         self.hook_authority = None;
         self.clear_agent_name();
         if !preserve_foreign_persisted_session {
@@ -1530,6 +1539,7 @@ impl TerminalState {
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
         self.fallback_observed_at = None;
+        self.background_pending = false;
         self.hook_authority = None;
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
@@ -1599,6 +1609,37 @@ impl TerminalState {
         })
     }
 
+    /// Record whether a reserved-native-state agent (e.g. Claude) has an
+    /// outstanding background task whose completion will resume the turn on its
+    /// own. Screen detection still owns the base state; this only upgrades an
+    /// otherwise-`Idle` pane to `Working` (see `recompute_effective_state`), so a
+    /// session waiting on a `run_in_background`/Monitor task is not shown as done.
+    pub fn set_background_pending(
+        &mut self,
+        pending: bool,
+        now: Instant,
+    ) -> Option<TerminalStateMutation> {
+        if self.background_pending == pending {
+            return None;
+        }
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        self.background_pending = pending;
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            // background_pending does not affect session-persistence identity.
+            session_ref_changed: false,
+        })
+    }
+
     fn recompute_effective_state(
         &mut self,
         previous_agent_label: Option<String>,
@@ -1614,6 +1655,15 @@ impl TerminalState {
                 .as_ref()
                 .map(|authority| authority.state)
                 .unwrap_or(self.fallback_state)
+        };
+        // A reserved-native-state agent (e.g. Claude) whose turn has ended while a
+        // background task is still pending is not done — it will resume itself when
+        // the task completes. Keep it presented as working rather than idle/done.
+        // This never overrides Blocked (needs-human) or a live working signal.
+        let state = if state == AgentState::Idle && self.background_pending {
+            AgentState::Working
+        } else {
+            state
         };
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
@@ -1752,6 +1802,51 @@ mod tests {
         assert_eq!(terminal.fallback_state, AgentState::Idle);
         assert_eq!(terminal.effective_agent_label(), Some("pi"));
         assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn background_pending_upgrades_idle_to_working() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        assert_eq!(terminal.state, AgentState::Idle);
+
+        // A pending background task keeps an otherwise-idle pane working.
+        let change = terminal.set_background_pending(true, Instant::now());
+        assert!(change.is_some_and(|mutation| mutation.effective_state_change.is_some()));
+        assert_eq!(terminal.state, AgentState::Working);
+
+        // A subsequent idle screen read must not flip it back to done while the
+        // task is still pending.
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        assert_eq!(terminal.state, AgentState::Working);
+
+        // Clearing the flag returns to idle — the genuine done state.
+        let cleared = terminal.set_background_pending(false, Instant::now());
+        assert!(cleared.is_some_and(|mutation| mutation.effective_state_change.is_some()));
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn background_pending_does_not_mask_blocked_or_working() {
+        let mut terminal = test_terminal();
+        terminal.set_background_pending(true, Instant::now());
+
+        // Blocked (needs human input) must never be hidden by a pending task.
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Blocked);
+        assert_eq!(terminal.state, AgentState::Blocked);
+
+        // Working stays working.
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn background_pending_is_noop_when_unchanged() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        assert!(terminal
+            .set_background_pending(false, Instant::now())
+            .is_none());
     }
 
     #[test]
