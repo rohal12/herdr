@@ -249,7 +249,10 @@ impl App {
             } else {
                 None
             };
-        let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
+        let git_status_affecting = matches!(
+            ev,
+            AppEvent::TerminalCwdReported { .. } | AppEvent::AgentActivityReported { .. }
+        );
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
         if let Some(agents) = manifest_update_agents {
@@ -269,7 +272,7 @@ impl App {
             }
         }
         self.sync_full_lifecycle_authority_detection_pauses();
-        if terminal_cwd_reported {
+        if git_status_affecting {
             self.mark_git_status_refresh_due(Instant::now());
             self.render_dirty.store(true, Ordering::Release);
             self.render_notify.notify_one();

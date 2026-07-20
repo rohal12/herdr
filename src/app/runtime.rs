@@ -885,6 +885,22 @@ mod tests {
     }
 
     #[test]
+    fn agent_activity_report_marks_git_status_refresh_due() {
+        // Reporting agent worktree activity must nudge a prompt git-status
+        // refresh (like TerminalCwdReported), so the branch chip updates
+        // promptly instead of only on the next periodic refresh.
+        let (mut app, pane_id) = test_app_with_pane();
+        app.git_refresh_in_flight = true;
+
+        app.handle_internal_event(crate::events::AppEvent::AgentActivityReported {
+            pane_id,
+            kind: crate::events::AgentActivityKind::Reset,
+        });
+
+        assert!(app.git_refresh_due_after_in_flight);
+    }
+
+    #[test]
     fn tick_selection_autoscroll_stops_when_metrics_unavailable() {
         // Without a runtime, pane_scroll_metrics returns None.
         // Fail-closed: stop autoscroll instead of rescheduling forever.
