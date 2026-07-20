@@ -24,7 +24,7 @@ pub(crate) use self::tab::MovedPane;
 pub use self::{
     git::{
         derive_label_from_cwd, effective_git_status_cwd, git_branch, git_space_metadata,
-        git_status_cache_key, GitSpaceMetadata, GitStatusCacheEntry,
+        git_status_cache_key, resolve_activity_worktree, GitSpaceMetadata, GitStatusCacheEntry,
     },
     tab::{NewPane, Tab},
 };

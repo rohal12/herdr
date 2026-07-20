@@ -309,6 +309,22 @@ pub fn effective_git_status_cwd(shell_cwd: &Path, foreground_cwd: Option<&Path>)
     }
 }
 
+/// Given a directory the agent touched and the pane's shell cwd, return the
+/// worktree checkout root when `activity_dir` lies in a *linked worktree of the
+/// same repository* as `shell_cwd` (shared git common dir, different checkout
+/// root); otherwise `None`. Mirrors `effective_git_status_cwd`'s follow rule so
+/// the two signals agree on what counts as "a worktree of this repo".
+pub fn resolve_activity_worktree(activity_dir: &Path, shell_cwd: &Path) -> Option<PathBuf> {
+    let shell_info = git_worktree_info(shell_cwd)?;
+    let activity_info = git_worktree_info(activity_dir)?;
+
+    let same_repo = shell_info.git_common_dir == activity_info.git_common_dir;
+    let different_checkout = canonicalize_best_effort_path(&shell_info.repo_root)
+        != canonicalize_best_effort_path(&activity_info.repo_root);
+
+    (same_repo && different_checkout).then(|| activity_info.repo_root.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -484,6 +500,65 @@ mod tests {
         run_git(path, &["config", "user.email", "herdr@example.invalid"]);
         run_git(path, &["config", "user.name", "Herdr Test"]);
         run_git(path, &["commit", "--allow-empty", "-m", "initial"]);
+    }
+
+    #[test]
+    fn resolve_activity_worktree_detects_linked_worktree_and_subdir() {
+        let base = temp_test_dir("activity-worktree");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo_with_commit(&repo);
+        let worktree = base.join("wt");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat-activity",
+                worktree.to_string_lossy().as_ref(),
+            ],
+        );
+        let nested = worktree.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        // A dir inside the linked worktree resolves to the worktree checkout root.
+        assert_eq!(
+            resolve_activity_worktree(&worktree, &repo).map(|p| canonicalize_best_effort_path(&p)),
+            Some(canonicalize_best_effort_path(&worktree))
+        );
+        assert_eq!(
+            resolve_activity_worktree(&nested, &repo).map(|p| canonicalize_best_effort_path(&p)),
+            Some(canonicalize_best_effort_path(&worktree))
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn resolve_activity_worktree_ignores_main_unrelated_and_non_git() {
+        let base = temp_test_dir("activity-worktree-none");
+        let repo = base.join("repo");
+        let other = base.join("other");
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        init_repo_with_commit(&repo);
+        init_repo_with_commit(&other);
+        let repo_sub = repo.join("src");
+        std::fs::create_dir_all(&repo_sub).unwrap();
+
+        // Main checkout (same repo, same checkout root) -> None.
+        assert_eq!(resolve_activity_worktree(&repo_sub, &repo), None);
+        // Unrelated repo -> None.
+        assert_eq!(resolve_activity_worktree(&other, &repo), None);
+        // Non-git activity dir -> None.
+        assert_eq!(resolve_activity_worktree(&plain, &repo), None);
+        // Non-git shell cwd -> None.
+        assert_eq!(resolve_activity_worktree(&repo, &plain), None);
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
