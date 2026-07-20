@@ -1060,6 +1060,19 @@ impl Workspace {
         terminals: &HashMap<TerminalId, TerminalState>,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> Option<PathBuf> {
+        // v2: an agent reported (via its hook) that it is working inside a
+        // linked worktree of this repo. This is the most intentional signal, so
+        // it wins over foreground_cwd and the shell cwd.
+        if let Some(active_worktree) = self
+            .tabs
+            .first()
+            .and_then(|tab| tab.terminal_id(tab.root_pane))
+            .and_then(|id| terminals.get(id))
+            .and_then(|terminal| terminal.active_worktree.clone())
+        {
+            return Some(active_worktree);
+        }
+
         let shell_cwd = self.resolved_identity_cwd_from(terminals, terminal_runtimes)?;
         let foreground_cwd = self
             .tabs
@@ -1623,6 +1636,28 @@ mod tests {
         assert_eq!(
             ws.resolved_git_status_cwd_from(&terminals, &terminal_runtimes),
             ws.resolved_identity_cwd_from(&terminals, &terminal_runtimes),
+        );
+    }
+
+    #[test]
+    fn resolved_git_status_cwd_prefers_reported_active_worktree() {
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let ws = Workspace::test_new("one");
+        let root_pane = ws.tabs[0].root_pane;
+        let terminal_id = ws.tabs[0].terminal_id(root_pane).unwrap().clone();
+
+        let worktree = std::path::PathBuf::from("/repo/.claude/worktrees/vfx");
+        let mut terminal = crate::terminal::TerminalState::new(
+            terminal_id.clone(),
+            std::path::PathBuf::from("/repo"),
+        );
+        terminal.active_worktree = Some(worktree.clone());
+        let mut terminals = std::collections::HashMap::new();
+        terminals.insert(terminal_id, terminal);
+
+        assert_eq!(
+            ws.resolved_git_status_cwd_from(&terminals, &terminal_runtimes),
+            Some(worktree)
         );
     }
 
