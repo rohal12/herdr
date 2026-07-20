@@ -7,11 +7,11 @@ use crate::api::schema::{
     PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit, PaneListParams, PaneMoveDestination,
     PaneMoveParams, PaneMoveReason, PaneMoveResult, PaneNeighborParams, PaneNeighborResult,
     PaneProcessInfo, PaneProcessInfoParams, PaneProcessInfoProcess, PaneReadParams, PaneReadResult,
-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
-    PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
-    PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentActivityParams, PaneReportAgentParams,
+    PaneReportAgentSessionParams, PaneReportMetadataParams, PaneResizeParams, PaneResizeReason,
+    PaneResizeResult, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams,
+    PaneSwapParams, PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams,
+    PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1259,6 +1259,33 @@ impl App {
             ),
         });
 
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    pub(super) fn handle_pane_report_agent_activity(
+        &mut self,
+        id: String,
+        params: PaneReportAgentActivityParams,
+    ) -> String {
+        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let kind = match params.kind.as_str() {
+            "turn_start" => crate::events::AgentActivityKind::TurnStart,
+            "turn_end" => crate::events::AgentActivityKind::TurnEnd,
+            "reset" => crate::events::AgentActivityKind::Reset,
+            "path" => match params.dir.filter(|d| !d.is_empty()) {
+                Some(dir) => crate::events::AgentActivityKind::Path(std::path::PathBuf::from(dir)),
+                // A "path" report with no dir is a no-op, not an error.
+                None => return encode_success(id, ResponseResult::Ok {}),
+            },
+            // Unknown kinds are ignored rather than failing the hook.
+            _ => return encode_success(id, ResponseResult::Ok {}),
+        };
+        self.handle_internal_event(crate::events::AppEvent::AgentActivityReported {
+            pane_id,
+            kind,
+        });
         encode_success(id, ResponseResult::Ok {})
     }
 
@@ -3802,5 +3829,37 @@ mod tests {
 
             assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
         }
+    }
+
+    #[test]
+    fn handle_pane_report_agent_activity_turn_reset_clears_worktree() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let root_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(root_pane)
+            .unwrap()
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .active_worktree = Some(std::path::PathBuf::from("/repo/.claude/worktrees/x"));
+
+        let params = PaneReportAgentActivityParams {
+            pane_id,
+            source: "herdr:claude".into(),
+            kind: "reset".into(),
+            dir: None,
+        };
+        let _ = app.handle_pane_report_agent_activity("id-1".into(), params);
+
+        assert_eq!(
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .active_worktree,
+            None
+        );
     }
 }

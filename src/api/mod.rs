@@ -64,6 +64,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneGraphicsStreamClose(_)
             | Method::PaneReportAgent(_)
             | Method::PaneReportAgentSession(_)
+            | Method::PaneReportAgentActivity(_)
             | Method::PaneReportMetadata(_)
             | Method::PaneClearAgentAuthority(_)
             | Method::PaneReleaseAgent(_)

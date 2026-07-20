@@ -656,6 +656,7 @@ mod tests {
             focused: true,
             cwd: None,
             foreground_cwd: None,
+            active_worktree: None,
             label: None,
             agent: None,
             title: None,

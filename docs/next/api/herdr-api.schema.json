@@ -726,6 +726,12 @@
         },
         "PaneInfo": {
           "properties": {
+            "active_worktree": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "agent": {
               "type": [
                 "string",
@@ -2727,6 +2733,33 @@
           },
           "required": [
             "pane_id"
+          ],
+          "type": "object"
+        },
+        "PaneReportAgentActivityParams": {
+          "properties": {
+            "dir": {
+              "description": "Directory of a file the agent touched; present when kind == \"path\".",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "description": "One of: \"path\", \"turn_start\", \"turn_end\", \"reset\".",
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "kind"
           ],
           "type": "object"
         },
@@ -5406,6 +5439,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.report_agent_activity",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportAgentActivityParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.report_metadata",
               "type": "string"
             },
@@ -7213,6 +7262,12 @@
         },
         "PaneInfo": {
           "properties": {
+            "active_worktree": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "agent": {
               "type": [
                 "string",

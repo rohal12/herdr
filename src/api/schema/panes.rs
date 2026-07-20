@@ -344,6 +344,17 @@ pub struct PaneReportAgentSessionParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportAgentActivityParams {
+    pub pane_id: String,
+    pub source: String,
+    /// One of: "path", "turn_start", "turn_end", "reset".
+    pub kind: String,
+    /// Directory of a file the agent touched; present when kind == "path".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReportMetadataParams {
     pub pane_id: String,
     pub source: String,
@@ -402,6 +413,8 @@ pub struct PaneInfo {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_worktree: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
