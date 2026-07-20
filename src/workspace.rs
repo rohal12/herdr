@@ -23,8 +23,8 @@ use self::git::git_ahead_behind;
 pub(crate) use self::tab::MovedPane;
 pub use self::{
     git::{
-        derive_label_from_cwd, git_branch, git_space_metadata, git_status_cache_key,
-        GitSpaceMetadata, GitStatusCacheEntry,
+        derive_label_from_cwd, effective_git_status_cwd, git_branch, git_space_metadata,
+        git_status_cache_key, GitSpaceMetadata, GitStatusCacheEntry,
     },
     tab::{NewPane, Tab},
 };
@@ -1051,6 +1051,26 @@ impl Workspace {
             .or_else(|| Some(self.identity_cwd.clone()))
     }
 
+    /// Cwd whose git branch/ahead-behind should be displayed. Prefers the
+    /// agent's foreground worktree over the shell cwd (see
+    /// `effective_git_status_cwd`). Git-space metadata and grouping stay on the
+    /// shell cwd via `resolved_identity_cwd_from`.
+    pub fn resolved_git_status_cwd_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<PathBuf> {
+        let shell_cwd = self.resolved_identity_cwd_from(terminals, terminal_runtimes)?;
+        let foreground_cwd = self
+            .tabs
+            .first()
+            .and_then(|tab| tab.foreground_cwd_for_pane(tab.root_pane, terminal_runtimes));
+        Some(effective_git_status_cwd(
+            &shell_cwd,
+            foreground_cwd.as_deref(),
+        ))
+    }
+
     pub fn display_name(&self) -> String {
         if let Some(name) = &self.custom_name {
             return name.clone();
@@ -1588,6 +1608,21 @@ mod tests {
         assert_eq!(
             ws.resolved_identity_cwd_from(&terminals, &terminal_runtimes),
             Some(PathBuf::from("/herdr-test/pion"))
+        );
+    }
+
+    #[test]
+    fn resolved_git_status_cwd_falls_back_to_identity_without_agent_worktree() {
+        let terminals = std::collections::HashMap::new();
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let mut ws = Workspace::test_new("one");
+        ws.identity_cwd = std::path::PathBuf::from("/tmp/herdr-status-cwd-test");
+
+        // With no runtimes reporting a foreground cwd, the status cwd equals the
+        // resolved identity cwd.
+        assert_eq!(
+            ws.resolved_git_status_cwd_from(&terminals, &terminal_runtimes),
+            ws.resolved_identity_cwd_from(&terminals, &terminal_runtimes),
         );
     }
 
