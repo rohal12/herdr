@@ -51,6 +51,16 @@ pub struct WorktreeRemoveResult {
     pub result: Result<(), String>,
 }
 
+/// A file-path / turn-boundary signal from an agent hook, used to derive the
+/// pane's active worktree. `Path` carries the directory the agent touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentActivityKind {
+    Path(std::path::PathBuf),
+    TurnStart,
+    TurnEnd,
+    Reset,
+}
+
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
@@ -137,6 +147,12 @@ pub enum AppEvent {
     TerminalCwdReported {
         pane_id: PaneId,
         cwd: std::path::PathBuf,
+    },
+    /// A file-path / turn-boundary signal from an agent hook, used to derive
+    /// the pane's active worktree.
+    AgentActivityReported {
+        pane_id: PaneId,
+        kind: AgentActivityKind,
     },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {

@@ -2864,6 +2864,46 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::AgentActivityReported { pane_id, kind } => {
+                let Some(terminal_id) = self.workspaces.iter().find_map(|ws| {
+                    ws.pane_state(pane_id)
+                        .map(|pane| pane.attached_terminal_id.clone())
+                }) else {
+                    return Vec::new();
+                };
+                let changed = match kind {
+                    crate::events::AgentActivityKind::TurnStart => {
+                        if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+                            terminal.activity_turn_start();
+                        }
+                        false
+                    }
+                    crate::events::AgentActivityKind::TurnEnd => self
+                        .terminals
+                        .get_mut(&terminal_id)
+                        .map(|terminal| terminal.activity_turn_end())
+                        .unwrap_or(false),
+                    crate::events::AgentActivityKind::Reset => self
+                        .terminals
+                        .get_mut(&terminal_id)
+                        .map(|terminal| terminal.reset_activity())
+                        .unwrap_or(false),
+                    crate::events::AgentActivityKind::Path(dir) => {
+                        let shell_cwd = self.terminals.get(&terminal_id).map(|t| t.cwd.clone());
+                        let worktree = shell_cwd.and_then(|shell| {
+                            crate::workspace::resolve_activity_worktree(&dir, &shell)
+                        });
+                        self.terminals
+                            .get_mut(&terminal_id)
+                            .map(|terminal| terminal.note_activity_worktree(worktree))
+                            .unwrap_or(false)
+                    }
+                };
+                if changed {
+                    self.mark_session_dirty();
+                }
+                Vec::new()
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -5311,6 +5351,93 @@ mod tests {
         assert_eq!(state.terminals.get(&terminal_id).unwrap().cwd, cwd);
         assert!(state.session_dirty);
         let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn agent_activity_sets_and_reverts_active_worktree() {
+        use crate::events::{AgentActivityKind, AppEvent};
+
+        // Real repo + linked worktree on disk so resolve_activity_worktree resolves.
+        let base = std::env::temp_dir().join(format!(
+            "herdr-activity-evt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::workspace::git::test_support::run_git(&repo, &["init"]);
+        crate::workspace::git::test_support::run_git(
+            &repo,
+            &["config", "user.email", "h@e.invalid"],
+        );
+        crate::workspace::git::test_support::run_git(&repo, &["config", "user.name", "H"]);
+        crate::workspace::git::test_support::run_git(
+            &repo,
+            &["commit", "--allow-empty", "-m", "init"],
+        );
+        let worktree = base.join("wt");
+        crate::workspace::git::test_support::run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat-evt",
+                worktree.to_string_lossy().as_ref(),
+            ],
+        );
+
+        let mut state = app_with_workspaces(&["one"]);
+        state.ensure_test_terminals();
+        let root_pane = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0]
+            .terminal_id(root_pane)
+            .unwrap()
+            .clone();
+        // Shell cwd = main checkout.
+        state.terminals.get_mut(&terminal_id).unwrap().cwd = repo.clone();
+
+        // Turn touches the worktree -> active worktree = worktree root.
+        state.handle_app_event(AppEvent::AgentActivityReported {
+            pane_id: root_pane,
+            kind: AgentActivityKind::TurnStart,
+        });
+        state.handle_app_event(AppEvent::AgentActivityReported {
+            pane_id: root_pane,
+            kind: AgentActivityKind::Path(worktree.join("src")),
+        });
+        assert_eq!(
+            state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .active_worktree
+                .as_deref(),
+            Some(worktree.as_path())
+        );
+
+        // A pure-main turn reverts.
+        state.handle_app_event(AppEvent::AgentActivityReported {
+            pane_id: root_pane,
+            kind: AgentActivityKind::TurnStart,
+        });
+        state.handle_app_event(AppEvent::AgentActivityReported {
+            pane_id: root_pane,
+            kind: AgentActivityKind::Path(repo.join("src")),
+        });
+        state.handle_app_event(AppEvent::AgentActivityReported {
+            pane_id: root_pane,
+            kind: AgentActivityKind::TurnEnd,
+        });
+        assert_eq!(
+            state.terminals.get(&terminal_id).unwrap().active_worktree,
+            None
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

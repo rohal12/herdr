@@ -4,7 +4,7 @@ mod config_tests;
 mod discovery;
 mod status;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use self::{
     discovery::{

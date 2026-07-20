@@ -15,6 +15,9 @@ use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 mod aggregate;
+#[cfg(test)]
+pub(crate) mod git;
+#[cfg(not(test))]
 mod git;
 mod tab;
 
