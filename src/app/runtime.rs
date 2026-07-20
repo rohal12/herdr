@@ -633,8 +633,8 @@ impl App {
             .workspaces
             .iter()
             .filter_map(|ws| {
-                let cwd =
-                    ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
+                let cwd = ws
+                    .resolved_git_status_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
                 let git_key = crate::workspace::git_status_cache_key(&cwd);
                 let cache_key = git_key.unwrap_or_else(|| cwd.clone());
                 Some(WorkspaceGitRefreshItem {

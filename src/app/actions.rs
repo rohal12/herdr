@@ -2592,12 +2592,20 @@ impl AppState {
             };
 
             if self.workspaces[ws_idx]
-                .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
+                .resolved_git_status_cwd_from(&self.terminals, terminal_runtimes)
                 .as_ref()
                 != Some(&result.resolved_identity_cwd)
             {
                 continue;
             }
+
+            // Keep git-space metadata (and therefore sidebar grouping and
+            // worktree-creation targeting) anchored to the shell/identity cwd,
+            // even when branch/ahead-behind follow an agent's worktree.
+            let identity_space = self.workspaces[ws_idx]
+                .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
+                .as_deref()
+                .and_then(crate::workspace::git_space_metadata);
 
             let ws = &mut self.workspaces[ws_idx];
             if ws.cached_git_branch != result.branch {
@@ -2608,8 +2616,8 @@ impl AppState {
                 ws.cached_git_ahead_behind = result.ahead_behind;
                 changed = true;
             }
-            if ws.cached_git_space != result.space {
-                ws.cached_git_space = result.space;
+            if ws.cached_git_space != identity_space {
+                ws.cached_git_space = identity_space;
                 changed = true;
             }
         }
@@ -4002,6 +4010,77 @@ mod tests {
 
         assert!(changed);
         assert_eq!(state.workspaces[0].worktree_space().cloned(), membership);
+    }
+
+    #[test]
+    fn apply_workspace_git_statuses_follows_worktree_branch_but_keeps_identity_space() {
+        // A real repo on disk so git_space_metadata resolves to Some for the
+        // identity cwd.
+        let repo = std::env::temp_dir().join(format!(
+            "herdr-apply-space-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let mut state = app_with_workspaces(&["one"]);
+        state.workspaces[0].identity_cwd = repo.clone();
+        state.workspaces[0].cached_git_branch = Some("main".into());
+        state.workspaces[0].cached_git_space = None;
+        let workspace_id = state.workspaces[0].id.clone();
+        // `app_with_workspaces` already snapshotted a terminal cwd from the
+        // original identity_cwd via `ensure_test_terminals`; refresh it so the
+        // resolvers see the newly assigned repo, matching a real pane whose
+        // shell cwd tracks its workspace.
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        state.terminals.get_mut(&terminal_id).unwrap().cwd = repo.clone();
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        // Guard matches on the status cwd; with no runtimes that is the identity cwd.
+        let status_cwd = state.workspaces[0]
+            .resolved_git_status_cwd_from(&state.terminals, &terminal_runtimes)
+            .unwrap();
+
+        let bogus_worktree_space = crate::workspace::GitSpaceMetadata {
+            key: "worktree-key".into(),
+            checkout_key: "/worktree/checkout".into(),
+            label: "worktree".into(),
+            repo_root: "/worktree/checkout".into(),
+            is_linked_worktree: true,
+        };
+
+        let changed = state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: status_cwd,
+                branch: Some("feature".into()),
+                ahead_behind: Some((3, 0)),
+                // Simulates the snapshot computing space from the worktree cwd;
+                // apply must ignore this and use the identity cwd instead.
+                space: Some(bogus_worktree_space.clone()),
+            }],
+        );
+
+        assert!(changed);
+        assert_eq!(state.workspaces[0].branch().as_deref(), Some("feature"));
+        assert_eq!(state.workspaces[0].git_ahead_behind(), Some((3, 0)));
+        assert_ne!(
+            state.workspaces[0].git_space().cloned(),
+            Some(bogus_worktree_space)
+        );
+        assert_eq!(
+            state.workspaces[0].git_space().cloned(),
+            crate::workspace::git_space_metadata(&repo)
+        );
+
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     fn mark_agent(state: &mut AppState, ws_idx: usize, tab_idx: usize, pane_id: PaneId) {
