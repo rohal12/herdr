@@ -276,6 +276,38 @@ pub(super) fn read_ref_oid(common_dir: &Path, full_ref: &str) -> Option<String> 
     None
 }
 
+/// Returns the cwd whose git branch/ahead-behind should be displayed for a pane.
+///
+/// Prefers `foreground_cwd` (the agent process group leader's cwd) over
+/// `shell_cwd` only when `foreground_cwd` is a *linked worktree of the same
+/// repository* as `shell_cwd` — i.e. it shares the repo's git common dir but
+/// has a different checkout root. Otherwise returns `shell_cwd`, so unrelated
+/// repos, subdirectories of the same checkout, non-git paths, and platforms
+/// without a foreground cwd all keep today's behavior.
+pub fn effective_git_status_cwd(shell_cwd: &Path, foreground_cwd: Option<&Path>) -> PathBuf {
+    let Some(foreground_cwd) = foreground_cwd else {
+        return shell_cwd.to_path_buf();
+    };
+    if foreground_cwd == shell_cwd {
+        return shell_cwd.to_path_buf();
+    }
+    let (Some(shell_info), Some(foreground_info)) =
+        (git_worktree_info(shell_cwd), git_worktree_info(foreground_cwd))
+    else {
+        return shell_cwd.to_path_buf();
+    };
+
+    let same_repo = shell_info.git_common_dir == foreground_info.git_common_dir;
+    let different_checkout = canonicalize_best_effort_path(&shell_info.repo_root)
+        != canonicalize_best_effort_path(&foreground_info.repo_root);
+
+    if same_repo && different_checkout {
+        foreground_cwd.to_path_buf()
+    } else {
+        shell_cwd.to_path_buf()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -444,6 +476,78 @@ mod tests {
         assert_eq!(derive_label_from_cwd(Path::new(&root)), label);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn init_repo_with_commit(path: &Path) {
+        run_git(path, &["init"]);
+        run_git(path, &["config", "user.email", "herdr@example.invalid"]);
+        run_git(path, &["config", "user.name", "Herdr Test"]);
+        run_git(path, &["commit", "--allow-empty", "-m", "initial"]);
+    }
+
+    #[test]
+    fn effective_cwd_follows_linked_worktree_of_same_repo() {
+        let base = temp_test_dir("effective-follow");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo_with_commit(&repo);
+        let worktree = base.join("wt");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                worktree.to_string_lossy().as_ref(),
+            ],
+        );
+
+        assert_eq!(
+            effective_git_status_cwd(&repo, Some(&worktree)),
+            worktree.clone()
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn effective_cwd_ignores_none_equal_and_subdir() {
+        let base = temp_test_dir("effective-ignore");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo_with_commit(&repo);
+        let subdir = repo.join("src");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        // No foreground cwd -> shell cwd.
+        assert_eq!(effective_git_status_cwd(&repo, None), repo.clone());
+        // Foreground == shell -> shell cwd.
+        assert_eq!(effective_git_status_cwd(&repo, Some(&repo)), repo.clone());
+        // Foreground in a subdir of the same checkout -> shell cwd (same repo root).
+        assert_eq!(effective_git_status_cwd(&repo, Some(&subdir)), repo.clone());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn effective_cwd_ignores_unrelated_repo_and_non_git_shell() {
+        let base = temp_test_dir("effective-unrelated");
+        let repo = base.join("repo");
+        let other = base.join("other");
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        init_repo_with_commit(&repo);
+        init_repo_with_commit(&other);
+
+        // Foreground in an unrelated repo -> shell cwd.
+        assert_eq!(effective_git_status_cwd(&repo, Some(&other)), repo.clone());
+        // Shell cwd not in a git repo -> shell cwd, even if foreground is a repo.
+        assert_eq!(effective_git_status_cwd(&plain, Some(&repo)), plain.clone());
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
