@@ -99,6 +99,14 @@ struct AgentNameOwner {
 pub struct TerminalState {
     pub id: TerminalId,
     pub cwd: PathBuf,
+    /// Checkout root of the linked worktree the agent is currently working in,
+    /// derived from the file paths it touches (reported by the agent hook). None
+    /// = the main checkout. Only affects git-branch display, never grouping or
+    /// worktree-creation targeting. See `note_activity_worktree`.
+    pub active_worktree: Option<PathBuf>,
+    /// Whether the current agent turn has touched any worktree (drives the
+    /// per-turn revert-to-main rule in `activity_turn_end`).
+    touched_worktree_this_turn: bool,
     pub detected_agent: Option<Agent>,
     pub fallback_state: AgentState,
     fallback_visible_blocker: bool,
@@ -138,6 +146,8 @@ impl TerminalState {
         Self {
             id,
             cwd,
+            active_worktree: None,
+            touched_worktree_this_turn: false,
             detected_agent: None,
             fallback_state: AgentState::Unknown,
             fallback_visible_blocker: false,
@@ -1607,6 +1617,50 @@ impl TerminalState {
                     .flatten()
             })
         })
+    }
+
+    /// Begin an agent turn: clear the per-turn worktree-touch flag. Does not
+    /// clear `active_worktree` — it persists across turns until a turn does only
+    /// main-checkout work (`activity_turn_end`) or the session resets.
+    pub fn activity_turn_start(&mut self) {
+        self.touched_worktree_this_turn = false;
+    }
+
+    /// Record that the agent touched a path resolving to `worktree`
+    /// (`Some` = a linked worktree of the pane's repo; `None` = main/unrelated).
+    /// Sticky: a worktree touch sets/switches the active worktree; a `None`
+    /// touch is ignored. Returns true if `active_worktree` changed.
+    pub fn note_activity_worktree(&mut self, worktree: Option<PathBuf>) -> bool {
+        let Some(worktree) = worktree else {
+            return false;
+        };
+        self.touched_worktree_this_turn = true;
+        if self.active_worktree.as_deref() == Some(worktree.as_path()) {
+            return false;
+        }
+        self.active_worktree = Some(worktree);
+        true
+    }
+
+    /// End an agent turn: revert to main if the turn touched no worktree.
+    /// Returns true if `active_worktree` changed.
+    pub fn activity_turn_end(&mut self) -> bool {
+        if self.touched_worktree_this_turn || self.active_worktree.is_none() {
+            return false;
+        }
+        self.active_worktree = None;
+        true
+    }
+
+    /// Clear all worktree-activity state (session start/resume/clear).
+    /// Returns true if `active_worktree` changed.
+    pub fn reset_activity(&mut self) -> bool {
+        self.touched_worktree_this_turn = false;
+        if self.active_worktree.is_none() {
+            return false;
+        }
+        self.active_worktree = None;
+        true
     }
 
     /// Record whether a reserved-native-state agent (e.g. Claude) has an
@@ -5061,5 +5115,43 @@ mod tests {
             terminal.hook_authority.as_ref().unwrap().source,
             "custom:pi"
         );
+    }
+
+    #[test]
+    fn active_worktree_is_sticky_within_turn_and_reverts_on_pure_main_turn() {
+        let wt_a = std::path::PathBuf::from("/repo/.claude/worktrees/a");
+        let wt_b = std::path::PathBuf::from("/repo/.claude/worktrees/b");
+        let mut t = TerminalState::new(TerminalId::alloc(), std::path::PathBuf::from("/repo"));
+
+        // Turn 1: touch worktree A, then incidental main touches -> stays A.
+        t.activity_turn_start();
+        assert!(t.note_activity_worktree(Some(wt_a.clone())));
+        assert_eq!(t.active_worktree.as_deref(), Some(wt_a.as_path()));
+        assert!(!t.note_activity_worktree(None)); // main touch: no change
+        assert_eq!(t.active_worktree.as_deref(), Some(wt_a.as_path()));
+        assert!(!t.activity_turn_end()); // turn touched a worktree -> keep
+
+        // Turn 2: switch to worktree B mid-turn.
+        t.activity_turn_start();
+        assert!(t.note_activity_worktree(Some(wt_b.clone())));
+        assert_eq!(t.active_worktree.as_deref(), Some(wt_b.as_path()));
+        assert!(!t.activity_turn_end());
+
+        // Turn 3: only main touches -> revert to main at turn end.
+        t.activity_turn_start();
+        assert!(!t.note_activity_worktree(None));
+        assert!(t.activity_turn_end()); // changed: reverted
+        assert_eq!(t.active_worktree, None);
+    }
+
+    #[test]
+    fn reset_activity_clears_active_worktree() {
+        let wt = std::path::PathBuf::from("/repo/.claude/worktrees/a");
+        let mut t = TerminalState::new(TerminalId::alloc(), std::path::PathBuf::from("/repo"));
+        t.activity_turn_start();
+        t.note_activity_worktree(Some(wt));
+        assert!(t.reset_activity());
+        assert_eq!(t.active_worktree, None);
+        assert!(!t.reset_activity()); // already clear -> no change
     }
 }
