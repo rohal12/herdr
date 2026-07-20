@@ -291,9 +291,10 @@ pub fn effective_git_status_cwd(shell_cwd: &Path, foreground_cwd: Option<&Path>)
     if foreground_cwd == shell_cwd {
         return shell_cwd.to_path_buf();
     }
-    let (Some(shell_info), Some(foreground_info)) =
-        (git_worktree_info(shell_cwd), git_worktree_info(foreground_cwd))
-    else {
+    let (Some(shell_info), Some(foreground_info)) = (
+        git_worktree_info(shell_cwd),
+        git_worktree_info(foreground_cwd),
+    ) else {
         return shell_cwd.to_path_buf();
     };
 
