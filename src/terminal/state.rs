@@ -1637,6 +1637,8 @@ impl TerminalState {
             ),
             // background_pending does not affect session-persistence identity.
             session_ref_changed: false,
+            // toggling background_pending does not release the agent process.
+            agent_released: false,
         })
     }
 
