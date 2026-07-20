@@ -8,6 +8,23 @@ fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> 
     )
 }
 
+/// Like `run_claude_hook`, but for actions that send more than one request
+/// over the socket (e.g. `SessionStart` under the `session` action, which now
+/// reports both an agent-activity reset and the session identity). Collects
+/// up to `expected` requests, matching them by call order.
+fn run_claude_hook_multi(
+    action: &str,
+    hook_input: &str,
+    expected: usize,
+) -> Vec<serde_json::Value> {
+    run_shell_hook_collect(
+        "src/integration/assets/claude/herdr-agent-state.sh",
+        &[action],
+        hook_input,
+        expected,
+    )
+}
+
 fn run_codex_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
     run_shell_hook(
         "src/integration/assets/codex/herdr-agent-state.sh",
@@ -108,6 +125,77 @@ fn run_shell_hook_with_env(
     request.map(|line| serde_json::from_str(&line).unwrap())
 }
 
+/// Like `run_shell_hook_with_env`, but for hook invocations that send more
+/// than one request over the socket: accepts connections until `expected`
+/// requests have been captured (or a bounded deadline passes).
+fn run_shell_hook_collect(
+    asset_path: &str,
+    args: &[&str],
+    hook_input: &str,
+    expected: usize,
+) -> Vec<serde_json::Value> {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(700);
+        let mut lines = Vec::new();
+        while lines.len() < expected && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    reader.read_line(&mut line).unwrap();
+                    let _ = stream.write_all(br#"{"id":"test","result":{"type":"ok"}}"#);
+                    let _ = stream.write_all(b"\n");
+                    let _ = stream.flush();
+                    lines.push(line);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("accept failed: {err}"),
+            }
+        }
+        lines
+    });
+
+    let hook_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(asset_path);
+    let mut command = Command::new("bash");
+    command
+        .arg(hook_path)
+        .args(args)
+        .env("HERDR_ENV", "1")
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env("HERDR_PANE_ID", "p_test")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(hook_input.as_bytes()).unwrap();
+    drop(stdin);
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "hook failed: status={:?} stderr={} stdout={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let lines = server.join().unwrap();
+    cleanup_test_base(&base);
+    lines
+        .into_iter()
+        .map(|line| serde_json::from_str(&line).unwrap())
+        .collect()
+}
+
 #[test]
 fn claude_hook_ignores_state_actions() {
     let subagent_input = r#"{"hook_event_name":"Notification","agent_id":"agent-abc123","agent_type":"Explore","notification_type":"permission_prompt"}"#;
@@ -138,15 +226,27 @@ fn claude_hook_keeps_parent_agent_type_only_blocked() {
 
 #[test]
 fn claude_hook_reports_session_id_from_stdin() {
-    let request = run_claude_hook(
+    // SessionStart under the "session" action now sends two requests: an
+    // agent-activity reset (clearing any active worktree from a prior
+    // session), then the session-identity report.
+    let requests = run_claude_hook_multi(
         "session",
         r#"{"hook_event_name":"SessionStart","session_id":"claude-session"}"#,
-    )
-    .expect("session start should report session identity");
+        2,
+    );
 
-    assert_eq!(request["method"], "pane.report_agent_session");
-    assert_eq!(request["params"]["agent_session_id"], "claude-session");
-    assert!(request["params"].get("state").is_none());
+    let reset = requests
+        .iter()
+        .find(|request| request["method"] == "pane.report_agent_activity")
+        .expect("session start should reset agent activity");
+    assert_eq!(reset["params"]["kind"], "reset");
+
+    let session = requests
+        .iter()
+        .find(|request| request["method"] == "pane.report_agent_session")
+        .expect("session start should report session identity");
+    assert_eq!(session["params"]["agent_session_id"], "claude-session");
+    assert!(session["params"].get("state").is_none());
 }
 
 #[test]

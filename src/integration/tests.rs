@@ -879,7 +879,7 @@ fn install_claude_writes_hook_and_updates_settings() {
     // run_in_background/Monitor task from being shown as a done checkmark.
     assert_eq!(
         settings["hooks"]["PreToolUse"][0]["matcher"],
-        "Bash|Monitor"
+        "Bash|Monitor|Edit|Write|Read|NotebookEdit"
     );
     assert!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         .as_str()

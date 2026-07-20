@@ -149,8 +149,10 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     // Background-task tracking: Claude uses the same idle terminal title whether a
     // turn is finished or has ended with a run_in_background/Monitor task still
     // pending. These hooks let the pane stay "working" while it waits, instead of
-    // showing a "done" checkmark. `bgtrack` dispatches on the hook event; the
-    // PreToolUse matcher limits its cost to the tools that arm background work.
+    // showing a "done" checkmark. `bgtrack` also reports the directory of files
+    // the agent touches (Edit/Write/Read/NotebookEdit) so herdr can show the
+    // active worktree branch. The PreToolUse matcher limits its cost to the tools
+    // that arm background work or carry a `file_path`/`notebook_path`.
     remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("bgtrack"))?;
     remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("bgtrack"))?;
     remove_hook_commands(hooks, "Stop", &hook_path, Some("bgtrack"))?;
@@ -159,7 +161,7 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         "PreToolUse",
         hook_command(&hook_path, Some("bgtrack")),
         10,
-        Some("Bash|Monitor"),
+        Some("Bash|Monitor|Edit|Write|Read|NotebookEdit"),
     )?;
     ensure_command_hook(
         hooks,

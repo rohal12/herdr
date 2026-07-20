@@ -98,6 +98,44 @@ def run():
         except OSError:
             pass
 
+    def report_activity(kind, dir_path=None):
+        params = {"pane_id": pane_id, "source": source, "kind": kind}
+        if dir_path is not None:
+            params["dir"] = dir_path
+        send({
+            "id": request_id(),
+            "method": "pane.report_agent_activity",
+            "params": params,
+        })
+
+    def wtdir_flag_path():
+        safe = "".join(c if c.isalnum() else "_" for c in pane_id)
+        return os.path.join(tempfile.gettempdir(), "herdr-claude-wtdir-" + safe)
+
+    def wtdir_flag_clear():
+        try:
+            os.remove(wtdir_flag_path())
+        except OSError:
+            pass
+
+    def report_activity_path(dir_path):
+        # Dedup consecutive identical dirs within a turn to limit socket traffic.
+        # The flag is cleared at turn boundaries so a new turn always re-reports.
+        path = wtdir_flag_path()
+        try:
+            with open(path, encoding="utf-8") as handle:
+                last = handle.read()
+        except OSError:
+            last = ""
+        if last == dir_path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(dir_path)
+        except OSError:
+            pass
+        report_activity("path", dir_path)
+
     # Background-task tracking. Claude sets an identical idle terminal title
     # whether a turn is finished or has ended with a run_in_background/Monitor
     # task still pending, so herdr cannot tell "done" from "waiting on a task"
@@ -118,7 +156,13 @@ def run():
                 except OSError:
                     pass
                 report_state("working")
+            if tool in ("Edit", "Write", "Read", "NotebookEdit"):
+                file_path = tool_input.get("file_path") or tool_input.get("notebook_path")
+                if isinstance(file_path, str) and file_path:
+                    report_activity_path(os.path.dirname(file_path))
         elif hook_event_name == "UserPromptSubmit":
+            report_activity("turn_start")
+            wtdir_flag_clear()
             prompt = str(hook_input.get("prompt") or "")
             if "<task-notification>" in prompt and "<event>" in prompt:
                 # An intermediate event from a still-running Monitor (e.g. a CI
@@ -136,6 +180,8 @@ def run():
                 # task is still armed.
                 bgflag_clear()
         elif hook_event_name == "Stop":
+            report_activity("turn_end")
+            wtdir_flag_clear()
             if os.path.exists(bgflag_path()):
                 report_state("working")
             else:
@@ -144,8 +190,10 @@ def run():
 
     # action == "session": link the pane to the Claude session for resume.
     if hook_event_name == "SessionStart":
-        # Fresh/resumed/cleared session: start from a clean background-task slate.
+        # Fresh/resumed/cleared session: clean background-task and worktree slate.
         bgflag_clear()
+        report_activity("reset")
+        wtdir_flag_clear()
     if hook_event_name == "SubagentStop":
         # SubagentStop is a completion event. Older Herdr integrations mapped it
         # to durable working, but Claude recap/away-summary can emit it after the

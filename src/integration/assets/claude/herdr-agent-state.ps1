@@ -41,6 +41,72 @@ function Report-State([string]$State) {
     } catch {}
 }
 
+function Get-WtdirFlagPath {
+    $safe = ($env:HERDR_PANE_ID -replace '[^0-9A-Za-z]', '_')
+    return (Join-Path ([System.IO.Path]::GetTempPath()) ("herdr-claude-wtdir-" + $safe))
+}
+
+function Clear-WtdirFlag {
+    try { Remove-Item -Force -ErrorAction SilentlyContinue (Get-WtdirFlagPath) } catch {}
+}
+
+function Get-HerdrRequestId {
+    $millis = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $rand = Get-Random -Minimum 0 -Maximum 1000000
+    return ("herdr:claude:{0}:{1:D6}" -f $millis, $rand)
+}
+
+function Send-HerdrRequest($Request) {
+    # Posts a single newline-terminated JSON request over the same socket the
+    # `herdr` CLI itself connects to (HERDR_SOCKET_PATH), mirroring the .sh
+    # hook's raw-socket `send()`. On Windows that path is a named pipe at
+    # \\.\pipe\<HERDR_SOCKET_PATH>. Best-effort/fire-and-forget: never throws,
+    # never blocks longer than the connect timeout, and does not wait for a
+    # response.
+    if ([string]::IsNullOrWhiteSpace($env:HERDR_SOCKET_PATH)) { return }
+    $pipe = $null
+    try {
+        $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
+            ".", $env:HERDR_SOCKET_PATH, [System.IO.Pipes.PipeDirection]::InOut
+        )
+        $pipe.Connect(500)
+        $json = (($Request | ConvertTo-Json -Compress -Depth 5) + "`n")
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+        $pipe.Write($bytes, 0, $bytes.Length)
+        $pipe.Flush()
+    } catch {
+    } finally {
+        if ($pipe) { try { $pipe.Dispose() } catch {} }
+    }
+}
+
+function Report-Activity([string]$Kind, [string]$DirPath) {
+    $reportParams = [ordered]@{
+        pane_id = $env:HERDR_PANE_ID
+        source  = "herdr:claude"
+        kind    = $Kind
+    }
+    if ($null -ne $DirPath) { $reportParams["dir"] = $DirPath }
+    Send-HerdrRequest ([ordered]@{
+        id     = (Get-HerdrRequestId)
+        method = "pane.report_agent_activity"
+        params = $reportParams
+    })
+}
+
+function Report-ActivityPath([string]$DirPath) {
+    # Dedup consecutive identical dirs within a turn to limit socket traffic.
+    # The flag is cleared at turn boundaries so a new turn always re-reports.
+    $path = Get-WtdirFlagPath
+    $last = $null
+    if (Test-Path $path) {
+        try { $last = Get-Content -Path $path -Raw -ErrorAction Stop } catch { $last = $null }
+    }
+    if ($last -eq $DirPath) { return }
+    try { Set-Content -Path $path -Value $DirPath -NoNewline -ErrorAction Stop } catch {}
+    Report-Activity "path" $DirPath
+}
+
 # Background-task tracking. Claude sets an identical idle terminal title whether a
 # turn is finished or has ended with a run_in_background/Monitor task still
 # pending, so keep the pane "working" while one is outstanding rather than showing
@@ -55,7 +121,17 @@ if ($Action -eq "bgtrack") {
             try { New-Item -ItemType File -Force -Path (Get-BgFlagPath) | Out-Null } catch {}
             Report-State "working"
         }
+        if ($tool -in @("Edit", "Write", "Read", "NotebookEdit")) {
+            $filePath = $null
+            if ($payload.tool_input.file_path) { $filePath = "$($payload.tool_input.file_path)" }
+            elseif ($payload.tool_input.notebook_path) { $filePath = "$($payload.tool_input.notebook_path)" }
+            if (-not [string]::IsNullOrWhiteSpace($filePath)) {
+                Report-ActivityPath (Split-Path -Parent $filePath)
+            }
+        }
     } elseif ($eventName -eq "UserPromptSubmit") {
+        Report-Activity "turn_start"
+        Clear-WtdirFlag
         $prompt = "$($payload.prompt)"
         if ($prompt -like "*<task-notification>*" -and $prompt -like "*<event>*") {
             # Intermediate event from a still-running Monitor (e.g. a CI pipeline
@@ -66,13 +142,19 @@ if ($Action -eq "bgtrack") {
             Clear-BgFlag
         }
     } elseif ($eventName -eq "Stop") {
+        Report-Activity "turn_end"
+        Clear-WtdirFlag
         if (Test-Path (Get-BgFlagPath)) { Report-State "working" } else { Report-State "idle" }
     }
     exit 0
 }
 
 # $Action -eq "session": link the pane to the Claude session for resume/tracking.
-if ($eventName -eq "SessionStart") { Clear-BgFlag }
+if ($eventName -eq "SessionStart") {
+    Clear-BgFlag
+    Report-Activity "reset"
+    Clear-WtdirFlag
+}
 if ($eventName -eq "SubagentStop") { exit 0 }
 
 $sessionId = $payload.session_id
