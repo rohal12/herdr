@@ -2594,7 +2594,7 @@ impl AppState {
             if self.workspaces[ws_idx]
                 .resolved_git_status_cwd_from(&self.terminals, terminal_runtimes)
                 .as_ref()
-                != Some(&result.resolved_identity_cwd)
+                != Some(&result.status_cwd)
             {
                 continue;
             }
@@ -3919,7 +3919,7 @@ mod tests {
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
                 workspace_id: first_id,
-                resolved_identity_cwd: first_cwd,
+                status_cwd: first_cwd,
                 branch: Some("main".into()),
                 ahead_behind: Some((2, 1)),
                 space: None,
@@ -3945,7 +3945,7 @@ mod tests {
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
                 workspace_id,
-                resolved_identity_cwd: std::path::PathBuf::from("/definitely/not/current"),
+                status_cwd: std::path::PathBuf::from("/definitely/not/current"),
                 branch: Some("main".into()),
                 ahead_behind: Some((0, 1)),
                 space: None,
@@ -3970,7 +3970,7 @@ mod tests {
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
                 workspace_id,
-                resolved_identity_cwd: cwd,
+                status_cwd: cwd,
                 branch: None,
                 ahead_behind: None,
                 space: None,
@@ -3995,7 +3995,7 @@ mod tests {
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
                 workspace_id,
-                resolved_identity_cwd: cwd,
+                status_cwd: cwd,
                 branch: Some("scratch".into()),
                 ahead_behind: None,
                 space: Some(crate::workspace::GitSpaceMetadata {
@@ -4059,7 +4059,7 @@ mod tests {
             &terminal_runtimes,
             vec![WorkspaceGitStatus {
                 workspace_id,
-                resolved_identity_cwd: status_cwd,
+                status_cwd,
                 branch: Some("feature".into()),
                 ahead_behind: Some((3, 0)),
                 // Simulates the snapshot computing space from the worktree cwd;

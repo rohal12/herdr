@@ -14,14 +14,14 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkspaceGitRefreshItem {
     pub(crate) workspace_id: String,
-    pub(crate) resolved_identity_cwd: std::path::PathBuf,
+    pub(crate) status_cwd: std::path::PathBuf,
     pub(crate) cache_key: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkspaceGitRefreshTarget {
     pub(crate) workspace_id: String,
-    pub(crate) resolved_identity_cwd: std::path::PathBuf,
+    pub(crate) status_cwd: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -639,7 +639,7 @@ impl App {
                 let cache_key = git_key.unwrap_or_else(|| cwd.clone());
                 Some(WorkspaceGitRefreshItem {
                     workspace_id: ws.id.clone(),
-                    resolved_identity_cwd: cwd,
+                    status_cwd: cwd,
                     cache_key,
                 })
             })
@@ -681,7 +681,7 @@ pub(crate) fn deduplicate_git_refresh_items(
     for item in items {
         let target = WorkspaceGitRefreshTarget {
             workspace_id: item.workspace_id,
-            resolved_identity_cwd: item.resolved_identity_cwd.clone(),
+            status_cwd: item.status_cwd.clone(),
         };
         if let Some(&index) = indexes.get(&item.cache_key) {
             jobs[index].targets.push(target);
@@ -718,7 +718,7 @@ pub(crate) fn refresh_workspace_git_statuses_with_cache(
         results.extend(job.targets.into_iter().map(move |target| {
             snapshot
                 .clone()
-                .into_workspace_status(target.workspace_id, target.resolved_identity_cwd)
+                .into_workspace_status(target.workspace_id, target.status_cwd)
         }));
     }
 
@@ -784,12 +784,12 @@ mod tests {
             vec![
                 WorkspaceGitRefreshItem {
                     workspace_id: "one".into(),
-                    resolved_identity_cwd: nested.clone(),
+                    status_cwd: nested.clone(),
                     cache_key: repo.clone(),
                 },
                 WorkspaceGitRefreshItem {
                     workspace_id: "two".into(),
-                    resolved_identity_cwd: other.clone(),
+                    status_cwd: other.clone(),
                     cache_key: repo.clone(),
                 },
             ],
@@ -800,15 +800,9 @@ mod tests {
         assert_eq!(output.cache_updates[0].0, repo);
         assert_eq!(output.results.len(), 2);
         assert_eq!(output.results[0].workspace_id, "one");
-        assert_eq!(
-            output.results[0].resolved_identity_cwd,
-            PathBuf::from(&nested)
-        );
+        assert_eq!(output.results[0].status_cwd, PathBuf::from(&nested));
         assert_eq!(output.results[1].workspace_id, "two");
-        assert_eq!(
-            output.results[1].resolved_identity_cwd,
-            PathBuf::from(&other)
-        );
+        assert_eq!(output.results[1].status_cwd, PathBuf::from(&other));
 
         let _ = std::fs::remove_dir_all(repo);
     }

@@ -41,7 +41,7 @@ pub struct WorktreeSpaceMembership {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceGitStatus {
     pub workspace_id: String,
-    pub resolved_identity_cwd: PathBuf,
+    pub status_cwd: PathBuf,
     pub branch: Option<String>,
     pub ahead_behind: Option<(usize, usize)>,
     pub space: Option<GitSpaceMetadata>,
@@ -58,11 +58,11 @@ impl WorkspaceGitStatusSnapshot {
     pub fn into_workspace_status(
         self,
         workspace_id: String,
-        resolved_identity_cwd: PathBuf,
+        status_cwd: PathBuf,
     ) -> WorkspaceGitStatus {
         WorkspaceGitStatus {
             workspace_id,
-            resolved_identity_cwd,
+            status_cwd,
             branch: self.branch,
             ahead_behind: self.ahead_behind,
             space: self.space,
@@ -1120,10 +1120,10 @@ impl Workspace {
     }
 
     pub fn git_status_snapshot_for_cwd_with_cache(
-        resolved_identity_cwd: &std::path::Path,
+        status_cwd: &std::path::Path,
         cached: Option<&GitStatusCacheEntry>,
     ) -> (WorkspaceGitStatusSnapshot, Option<GitStatusCacheEntry>) {
-        self::git::git_status_snapshot_for_cwd(resolved_identity_cwd, cached)
+        self::git::git_status_snapshot_for_cwd(status_cwd, cached)
     }
 
     pub fn find_tab_index_for_pane(&self, pane_id: PaneId) -> Option<usize> {

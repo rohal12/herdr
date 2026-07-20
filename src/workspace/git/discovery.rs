@@ -513,6 +513,37 @@ mod tests {
     }
 
     #[test]
+    fn effective_cwd_follows_subdir_inside_linked_worktree() {
+        // The realistic case: an agent process sits in a subdirectory *inside*
+        // the linked worktree, not at its root. It must still follow into the
+        // worktree (git_repo_root walks up to the worktree checkout root).
+        let base = temp_test_dir("effective-follow-subdir");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo_with_commit(&repo);
+        let worktree = base.join("wt");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature-sub",
+                worktree.to_string_lossy().as_ref(),
+            ],
+        );
+        let nested = worktree.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            effective_git_status_cwd(&repo, Some(&nested)),
+            nested.clone()
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn effective_cwd_ignores_none_equal_and_subdir() {
         let base = temp_test_dir("effective-ignore");
         let repo = base.join("repo");
